@@ -63,16 +63,25 @@ def build_uv_interpolator(df_lut,variable_uv):
     return interp_uv
     
 
-def apply_interpolator(interp_uv,df_cams,station):
-    X_cams = np.column_stack([
-        np.full(len(df_cams), station["elevation"]/1000), #Ojo con elevation en km!!
-        df_cams["tco3"],
-        df_cams["aod550"],
-        df_cams["tcwv"],
-        np.full(len(df_cams), 1.0),  # alpha fijo
-        df_cams["sza"]
-    ])
-
+def apply_interpolator(interp_uv,df_cams,station,atm_source="cams"):
+    if atm_source == 'cams':
+        X_cams = np.column_stack([
+            np.full(len(df_cams), station["elevation"]/1000), #Ojo con elevation en km!!
+            df_cams["tco3"],
+            df_cams["aod550"],
+            df_cams["tcwv"],
+            np.full(len(df_cams), 1.0),  # alpha fijo
+            df_cams["sza"]
+        ])
+    elif atm_source == 'merra':
+        X_cams = np.column_stack([
+            np.full(len(df_cams), station["elevation"]/1000), #Ojo con elevation en km!!
+            df_cams["o3"],
+            df_cams["aod"],
+            df_cams["wv"],
+            df_cams["alpha"],  # Merra tiene alpha!
+            df_cams["sza"]
+        ])
     uv_lut = interp_uv(X_cams)
     return uv_lut
     

@@ -8,7 +8,7 @@ Created on Tue Aug 18 15:31:56 2026
 
 import matplotlib.pyplot as plt
 
-def plot_validation(df_uv,df_results,msk):
+def plot_validation(df_uv,df_results,msk,station):
     
     fig, axs = plt.subplots(1, 2, figsize=(12, 6), constrained_layout=True)
 
@@ -16,7 +16,9 @@ def plot_validation(df_uv,df_results,msk):
         ("uva", "uva_lut", "UVA"),
         ("uvb", "uvb_lut", "UVB")
     ]
-
+    
+    fig.suptitle(f"{station}")
+    
     for ax, (obs_col, est_col, titulo) in zip(axs, variables):
 
         obs = df_uv.loc[msk, obs_col].to_numpy()
@@ -51,6 +53,8 @@ def plot_validation(df_uv,df_results,msk):
             va="top",
             bbox=dict(facecolor="white", alpha=0.8),
         )
+        
+        ax.grid()
         
     # plt.savefig(ruta_fig / f"dispersion_UV_{station}_2.png", dpi=300)
     plt.show()

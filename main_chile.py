@@ -19,29 +19,32 @@ from pathlib import Path
 
 
 #%% TEST MERRA-2
-# station = STATIONS["IZA"]
 
-# auth = mr.login_merra()
+station_label = "PAR"
+station = STATIONS[station_label]
+
+auth = mr.login_merra()
 
 
-# df_merra = mr.process_merra(
-#     STATIONS["IZA"],
-#     "2024-10-01",
-#     "2024-10-31",
-# )
+df_merra = mr.process_merra(
+    STATIONS[station_label],
+    "2022-10-01",
+    "2022-10-31",
+)
 
-# plot_atmospheric_vars(df_merra,"merra")
+plot_atmospheric_vars(df_merra,"merra")
 
-# cwd = Path.cwd()
-# ruta_merra = Path(cwd / 'data' / 'raw' / 'merra')
+cwd = Path.cwd()
+ruta_merra = Path(cwd / 'data' / 'raw' / 'merra')
 
-# df_merra.to_csv(ruta_merra / "IZA_MERRA.csv")
+df_merra.to_csv(ruta_merra / f"{station_label}_MERRA.csv")
 
 #%%
 def main():
 
     # Configuration
-    station = STATIONS["IZA"]
+    station_label = "PAR"
+    station = STATIONS[station_label]
     
     cwd = Path.cwd()
     ruta_cams = Path(cwd / 'data' / 'raw' / 'cams')

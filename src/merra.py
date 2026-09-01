@@ -30,6 +30,8 @@ MERRA_PRODUCTS = {
 import pandas as pd
 import earthaccess
 import xarray as xr
+from pathlib import Path
+import pvlib
 
 
 def login_merra():
@@ -75,7 +77,7 @@ def open_merra_dataset(granule):
 
     return ds
 
-def load_merra(station, start, end):
+def load_merra_data(station, start, end):
     """
     Load MERRA-2 atmospheric data for a station.
 
@@ -184,5 +186,80 @@ def load_merra(station, start, end):
 
     df.index = df.index.tz_localize("UTC")
     df.index = df.index.tz_convert(station["tz"])
+
+    return df
+
+def process_merra(station, start, end):
+    """
+    Load MERRA-2 atmospheric data and resample it to 1-minute resolution.
+    """
+
+    # ---------------------------------------------------------
+    # Cargar datos horarios
+    # ---------------------------------------------------------
+
+    df = load_merra_data(
+        station,
+        start,
+        end,
+    )
+
+    # ---------------------------------------------------------
+    # Crear índice minutal completo
+    # ---------------------------------------------------------
+
+    full_index = pd.date_range(
+        start=df.index.min(),
+        end=df.index.max() + pd.Timedelta(minutes=59),
+        freq="1min",
+        tz=station["tz"],
+    )
+
+    # ---------------------------------------------------------
+    # Reindexar e interpolar
+    # ---------------------------------------------------------
+
+    df = (
+        df
+        .reindex(full_index)
+        .interpolate(method="time")
+    )
+
+    return df
+
+def filename_merra(station, path):
+    label = station["name"]
+    file_str_merra = f"{label}_MERRA.csv"
+    file_merra = Path(path / file_str_merra)
+    return file_merra
+
+
+def load_merra(station, path):
+    
+    filename = filename_merra(station, path)
+    
+    df = pd.read_csv(
+        filename,
+        index_col=0,
+    )
+
+    # ---------------------------------------------------------
+    # Timezone
+    # ---------------------------------------------------------
+
+    df.index = pd.to_datetime(df.index, utc=True)
+    df.index = df.index.tz_convert(station["tz"])
+
+    # ---------------------------------------------------------
+    # Solar zenith angle
+    # ---------------------------------------------------------
+
+    solar_position = pvlib.solarposition.get_solarposition(
+        time=df.index,
+        latitude=station["lat"],
+        longitude=station["lon"],
+    )
+
+    df["sza"] = solar_position["zenith"]
 
     return df
