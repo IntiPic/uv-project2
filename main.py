@@ -8,15 +8,15 @@ Created on Tue Aug 18 11:11:08 2026
 
 from config import STATIONS
 from src.cams import load_cams
-from src.measurements import load_bsrn_uv, load_bsrn_rad
-from src.lut import load_lut, build_uv_interpolator, apply_interpolator
 from src.clearsky import detect_clearsky
 from src.validation import validation_metrics, msk_not_nan
 from src.plotting import plot_validation, plot_atmospheric_vars
+import src.measurements as ms
 import src.merra as mr
+import src.lut as lt
 import pandas as pd
 from pathlib import Path
-
+import matplotlib.pyplot as plt
 
 #%% TEST MERRA-2
 # station = STATIONS["IZA"]
@@ -41,7 +41,8 @@ from pathlib import Path
 def main():
 
     # Configuration
-    station = STATIONS["IZA"]
+    station_label = "IZA"
+    station = STATIONS[station_label]
     
     cwd = Path.cwd()
     ruta_cams = Path(cwd / 'data' / 'raw' / 'cams')
@@ -49,58 +50,114 @@ def main():
     ruta_uv = Path(cwd / 'data' / 'raw' / 'uv')
     ruta_rad = Path(cwd / 'data' / 'raw' / 'rad')
     ruta_lut = Path(cwd / 'data' / 'lut')
-    # ruta_fig =  cwd.parent / 'FIG'
+    ruta_fig =  Path(cwd / 'out' / 'fig')
     
+    # --------------------------------------------------
     # Load data
-    df_cams = load_cams(station,ruta_cams)
-    df_merra = mr.load_merra(station,ruta_merra)
-    df_merra = df_merra.iloc[60:] # CAMBIAR LUEGO!!
-    # print(df_cams.head())
+    # --------------------------------------------------
     
-    df_uv = load_bsrn_uv(station, ruta_uv)
-    df_rad = load_bsrn_rad(station, ruta_rad)
-    #print(df_uv.head())
-    #print(df_rad.head())
+    df_cams = load_cams(station, ruta_cams)
+    df_merra = mr.load_merra(station, ruta_merra)
     
-    df_lut = load_lut(ruta_lut)
-    # print(df_lut.head())
-        
-
-    # # LUT
-    interp_uva = build_uv_interpolator(df_lut, "uva")
-    interp_uvb = build_uv_interpolator(df_lut, "uvb")
+    df_uv = ms.load_bsrn_uv(station, ruta_uv)
+    df_rad = ms.load_bsrn_rad(station, ruta_rad)
     
-    #print(interp_uva)
-
     
-    # # Clear-sky detection & sun above 10 deg. elevation
-    msk_csk = detect_clearsky(df_cams,df_rad) #incluye sza < 80
+    # --------------------------------------------------
+    # Align datasets temporally
+    # --------------------------------------------------
     
-    df_uv["uva_lut"] = apply_interpolator(
+    idx = (
+        df_cams.index
+        .intersection(df_merra.index)
+        .intersection(df_uv.index)
+        .intersection(df_rad.index)
+    )
+    
+    df_cams = df_cams.loc[idx]
+    df_merra = df_merra.loc[idx]
+    df_uv = df_uv.loc[idx]
+    df_rad = df_rad.loc[idx]
+    
+    
+    # --------------------------------------------------
+    # LUT
+    # --------------------------------------------------
+    
+    ds_lut = lt.load_lut_spectral(ruta_lut)
+    
+    
+    # UVA: 320–400 nm, sin weighting eritemático
+    lut_uva = lt.integrate_lut(
+        ds_lut,
+        wavelength_min=315,
+        wavelength_max=400,
+        erythemal=False
+    )
+    
+    interp_uva = lt.build_uv_interpolator2(lut_uva)
+    
+    
+    # UVB: 280–320 nm, sin weighting eritemático
+    lut_uvb = lt.integrate_lut(
+        ds_lut,
+        wavelength_min=280,
+        wavelength_max=315,
+        erythemal=False
+    )
+    
+    interp_uvb = lt.build_uv_interpolator2(lut_uvb)
+    
+    
+    # --------------------------------------------------
+    # Clear-sky detection & sun above 10 deg elevation
+    # --------------------------------------------------
+    
+    msk_csk = detect_clearsky(df_cams, df_rad)
+    
+    
+    # --------------------------------------------------
+    # LUT estimation using MERRA
+    # --------------------------------------------------
+    
+    df_uv["uva_lut"] = lt.apply_interpolator(
         interp_uva,
         df_merra,
         station,
         "merra",
     )
-
-    df_uv["uvb_lut"] = apply_interpolator(
+    
+    df_uv["uvb_lut"] = lt.apply_interpolator(
         interp_uvb,
         df_merra,
         station,
         "merra",
     )
     
+    
+    # --------------------------------------------------
+    # Valid data mask
+    # --------------------------------------------------
+    
     msk_valid = msk_not_nan(df_rad, df_uv)
     
+    
+    # --------------------------------------------------
+    # Validation
+    # --------------------------------------------------
+    
+    msk = msk_csk & msk_valid
+    
     uva_results = validation_metrics(
-        df_uv.loc[msk_csk & msk_valid,"uva_lut"],
-        df_uv.loc[msk_csk & msk_valid,"uva"],
+        df_uv.loc[msk, "uva_lut"],
+        df_uv.loc[msk, "uva"],
     )
     
     uvb_results = validation_metrics(
-        df_uv.loc[msk_csk,"uvb_lut"],
-        df_uv.loc[msk_csk,"uvb"],
+        df_uv.loc[msk, "uvb_lut"],
+        df_uv.loc[msk, "uvb"],
     )
+    
     
     results = pd.concat(
         [uva_results, uvb_results],
@@ -108,18 +165,20 @@ def main():
     ).reset_index(level=1, drop=True)
     
     results.index.name = "variable"
-
+    
     
     print("Metrics:\n", results.round(2))
     print("UVB:\n", uvb_results.round(2))
-
-    # # Plots
     
-    # plot_atmospheric_vars(df_cams)
-    # plot_atmospheric_vars(df_merra,"merra")
+    
+    # --------------------------------------------------
+    # Plots
+    # --------------------------------------------------
+    
+    plot_atmospheric_vars(df_merra,"merra")
+    plt.savefig(ruta_fig / f"{station_label}_atmosphere.png") 
     plot_validation(df_uv,results,msk_csk & msk_valid,station["name"])
-    
-
+    plt.savefig(ruta_fig / f"{station_label}_validation.png")  
 if __name__ == "__main__":
     main()
 

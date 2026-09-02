@@ -249,6 +249,20 @@ def load_merra(station, path):
 
     df.index = pd.to_datetime(df.index, utc=True)
     df.index = df.index.tz_convert(station["tz"])
+    
+    start = pd.Period(station["period"], freq="M").start_time
+    end = pd.Period(station["period"], freq="M").end_time.floor("min")
+    
+    start = start.tz_localize(station["tz"])
+    end = end.tz_localize(station["tz"])
+    
+    idx = pd.date_range(
+        start=start,
+        end=end,
+        freq="1min"
+    )
+    
+    df = df.reindex(idx)
 
     # ---------------------------------------------------------
     # Solar zenith angle
@@ -261,5 +275,7 @@ def load_merra(station, path):
     )
 
     df["sza"] = solar_position["zenith"]
+    
+    
 
     return df

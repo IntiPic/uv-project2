@@ -164,8 +164,7 @@ def load_bsrn_rad(station, path, start=None, end=None):
 
 def load_chile_uv(station, path, start=None, end=None):
 
-    filename = filenames(station, path)
-    filename = filename[0]
+    filename = filenames(station, path)[0]
     tz_local = station["tz"]
 
     df = pd.read_csv(
@@ -174,24 +173,27 @@ def load_chile_uv(station, path, start=None, end=None):
         index_col=0
     )
 
-    # Los timestamps del archivo ya están en hora local
-    df.index = (
-        pd.to_datetime(df.index)
-        .tz_localize(tz_local)
-    )
-
+    df.index = pd.to_datetime(df.index).tz_localize(tz_local)
     df.index.name = "Date"
 
     df = df.rename(columns={df.columns[0]: "uvb"})
 
-    # Completar la serie de 5 minutos
-    idx = pd.date_range(
-        start=start,
-        end=end,
-        freq="5min"
+    if start is None:
+        period = pd.Period(station["period"], freq="M")
+        start = period.start_time.tz_localize(tz_local)
+        end = period.end_time.floor("min").tz_localize(tz_local)
+
+    # Índice final a 1 minuto
+    idx = pd.date_range(start=start, end=end, freq="1min")
+
+    # Interpolar desde los datos originales de 5 min
+    df = (
+        df.reindex(idx)
+          .interpolate(method="time")
     )
 
-    df = df.reindex(idx)
+    # Completar los minutos finales posteriores a la última medición
+    df = df.ffill()
 
     return df
 
@@ -217,29 +219,23 @@ def load_chile_rad(station, path, start=None, end=None):
 
     df["ghi"] = pd.to_numeric(df["ghi"], errors="coerce")
 
-    if start is not None:
-        df = df.loc[df.index >= start]
+    start = pd.Period(station["period"], freq="M").start_time
+    end = pd.Period(station["period"], freq="M").end_time.floor("min")
     
-    if end is not None:
-        df = df.loc[df.index <= end]
+    start = start.tz_localize(station["tz"])
+    end = end.tz_localize(station["tz"])
 
     # Completar minutos faltantes con NaN
-    # idx = pd.date_range(
-    #     start=start,
-    #     end=end,
-    #     freq="1min",
-    #     tz=station["tz"]
-    # )
+    idx = pd.date_range(
+        start=start,
+        end=end,
+        freq="1min",
+        tz=station["tz"]
+    )
     
-    df = df.reindex(
-        pd.date_range(
-            start=start,
-            end=end,
-            freq="1min"
-        )
-    )   
+    df = df.reindex(idx)
+
     
-    df.index.name = "Date"
 
     return df
 

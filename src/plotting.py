@@ -116,3 +116,44 @@ def plot_atmospheric_vars(df,source = 'cams'):
         plt.tight_layout()
         # plt.savefig(ruta_fig / f"cams_variables_atmosfericas_{station}.png", dpi=300)
         plt.show()
+        
+        
+def plot_validation_chile(df_uv, df_results, msk, station):
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    obs = df_uv.loc[msk, "uvb"].to_numpy()
+    est = df_uv.loc[msk, "uvb_lut"].to_numpy()
+
+    nmbd = df_results["nmbd"].iloc[0]
+    nrmsd = df_results["nrmsd"].iloc[0]
+    N = df_results["n"].iloc[0]
+
+    ax.scatter(obs, est, s=8, alpha=0.5)
+
+    lim = [0, max(obs.max(), est.max())]
+    ax.plot(lim, lim, "k--", lw=1)
+
+    ax.set_xlim(lim)
+    ax.set_ylim(lim)
+    ax.set_aspect("equal")
+
+    ax.set_title("UVB")
+    ax.set_xlabel("UVB medida (W m$^{-2}$)")
+    ax.set_ylabel("UVB LUT (W m$^{-2}$)")
+
+    ax.text(
+        0.05,
+        0.95,
+        f"N = {N}\n"
+        f"nMBD = {nmbd:.1f} %\n"
+        f"nRMSD = {nrmsd:.1f} %",
+        transform=ax.transAxes,
+        va="top",
+        bbox=dict(facecolor="white", alpha=0.8),
+    )
+
+    ax.grid()
+
+    fig.suptitle(station)
+    plt.show()

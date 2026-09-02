@@ -9,6 +9,12 @@ Created on Tue Aug 18 13:48:26 2026
 import pvlib as pv
 
 def detect_clearsky(df_cams, df_rad):
+    
+    # Intersecto indices por las dudass
+    idx = df_cams.index.intersection(df_rad.index)
+    df_cams = df_cams.loc[idx]
+    df_rad = df_rad.loc[idx]
+    
     GHI_csk_cams = df_cams['Clear sky GHI'] * 60
 
     msk_csk = pv.clearsky.detect_clearsky(

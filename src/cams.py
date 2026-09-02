@@ -38,9 +38,9 @@ def load_cams(station, path):
     df["Date"] = (pd.to_datetime(df["Observation period"].str.split("/").str[0],
             utc=True
         ).dt.tz_convert(tz_local))
-
+    
     df = df.set_index("Date").drop(columns="Observation period")
-
+    
     df["aod550"] = (df["AOD BC"]+ df["AOD DU"]+ df["AOD SS"]+ df["AOD OR"]+ df["AOD SU"]
         + df["AOD NI"]+ df["AOD AM"] + df["AOD SO"])
 
@@ -51,6 +51,20 @@ def load_cams(station, path):
         "Angstrom exponent": "alpha",
         "GHI": "ghi"
     })
+
+    start = pd.Period(station["period"], freq="M").start_time.tz_localize(station["tz"])
+    end = pd.Period(station["period"], freq="M").end_time.floor("min").tz_localize(station["tz"])
+    
+    idx = pd.date_range(
+        start=start,
+        end=end,
+        freq="1min",
+        tz=station["tz"]
+    )
+    
+    df = df.reindex(idx)    
+    
+    
 
     return df
 
