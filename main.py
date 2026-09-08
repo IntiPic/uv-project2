@@ -21,21 +21,22 @@ import matplotlib.pyplot as plt
 #%% TEST MERRA-2
 # station = STATIONS["IZA"]
 
-# auth = mr.login_merra()
+station = STATIONS["BON"]
+start = "2024-10-01"
+end = "2024-10-31"
 
+df = mr.process_merra(station, start, end)
 
-# df_merra = mr.process_merra(
-#     STATIONS["IZA"],
-#     "2024-10-01",
-#     "2024-10-31",
-# )
+carpeta = (
+    Path("/Users/inti/Desktop/SolarResearch/uv-project2")
+    / "data/processed/merra"
+    / station["name"]
+)
+carpeta.mkdir(parents=True, exist_ok=True)
 
-# plot_atmospheric_vars(df_merra,"merra")
-
-# cwd = Path.cwd()
-# ruta_merra = Path(cwd / 'data' / 'raw' / 'merra')
-
-# df_merra.to_csv(ruta_merra / "IZA_MERRA.csv")
+archivo = carpeta / f"{station['name']}_MERRA_{start}_{end}.csv"
+df.to_csv(archivo)
+print(archivo)
 
 #%%
 def main():

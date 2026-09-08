@@ -7,6 +7,14 @@ Created on Tue Aug 18 11:12:15 2026
 """
 
 STATIONS = {
+    "BON": {
+        "name": "BON",
+        "lat": 40.05,
+        "lon": -88.37,
+        "period": "2024-10",
+        # Output index timezone only; observational-file time origins are separate.
+        "tz": "America/Chicago",
+    },
     "IZA": {
         "name": "IZA",
         "lat": 28.30935,
