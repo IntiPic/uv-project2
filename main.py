@@ -6,7 +6,7 @@ Created on Tue Aug 18 11:11:08 2026
 @author: inti
 """
 
-from config import STATIONS
+from config import STATIONS, STATIONS_USA
 from src.cams import load_cams
 from src.clearsky import detect_clearsky
 from src.validation import validation_metrics, msk_not_nan
@@ -21,22 +21,25 @@ import matplotlib.pyplot as plt
 #%% TEST MERRA-2
 # station = STATIONS["IZA"]
 
-station = STATIONS["BON"]
-start = "2024-10-01"
-end = "2024-10-31"
+# cwd = Path.cwd()
 
-df = mr.process_merra(station, start, end)
+# station_id = "BRW"
+# station = STATIONS_USA[station_id]
+# start = "2024-01-01"
+# end = "2024-01-02"
 
-carpeta = (
-    Path("/Users/inti/Desktop/SolarResearch/uv-project2")
-    / "data/processed/merra"
-    / station["name"]
-)
-carpeta.mkdir(parents=True, exist_ok=True)
+# df = mr.process_merra(station, start, end)
 
-archivo = carpeta / f"{station['name']}_MERRA_{start}_{end}.csv"
-df.to_csv(archivo)
-print(archivo)
+# carpeta = (
+#     Path(cwd)
+#     / "data/processed/merra"
+#     / station_id
+# )
+# carpeta.mkdir(parents=True, exist_ok=True)
+
+# archivo = carpeta / f"{station_id}_MERRA_{start}_{end}.csv"
+# df.to_csv(archivo)
+# print(archivo)
 
 #%%
 def main():

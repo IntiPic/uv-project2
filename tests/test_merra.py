@@ -10,10 +10,10 @@ import pandas as pd
 import requests
 import xarray as xr
 
-from config import STATIONS
+from config import STATIONS_USA
 from src import merra, merra2
 
-BON = STATIONS["BON"]
+BON = {**STATIONS_USA["BON"], "name": "BON"}
 UNITS = {"o3": "Dobsons", "wv": "kg m-2", "aod": "1", "alpha": "1"}
 
 
@@ -64,10 +64,49 @@ class PeriodTests(unittest.TestCase):
                 merra._minute_index(start, end)
 
 
+class NativeProcessingTests(unittest.TestCase):
+    def test_native_values_timestamps_columns_and_attrs(self):
+        data = hourly_data(BON, "2024-10-01", "2024-10-01")
+        with patch.object(merra, "load_merra_data", return_value=data):
+            result = merra.process_merra(BON, "2024-10-01", "2024-10-01")
+        pd.testing.assert_frame_equal(result, data.iloc[1:-1])
+        self.assertEqual(result.attrs, data.attrs)
+        self.assertEqual(len(result), 24)
+        self.assertTrue((result.index.tz_convert("UTC").minute == 30).all())
+
+    def test_exact_bounds_and_empty_period(self):
+        data = hourly_data(BON, "2024-10-01", "2024-10-01")
+        for start, end, count in [
+            ("2024-10-01T01:29:15", "2024-10-01T01:30:00", 1),
+            ("2024-10-01T01:30:01", "2024-10-01T02:29:59", 0),
+            ("2024-10-01", "2024-10-01T00:00:00", 0),
+            (date(2024, 10, 1), date(2024, 10, 1), 24),
+        ]:
+            with self.subTest(start=start, end=end), patch.object(merra, "load_merra_data", return_value=data):
+                self.assertEqual(len(merra.process_merra(BON, start, end)), count)
+
+    def test_dst_preserves_native_instants(self):
+        for day, count in [("2024-03-10", 23), ("2024-11-03", 25)]:
+            start = pd.Timestamp(day, tz=BON["tz"])
+            end = pd.Timestamp(f"{day}T23:59", tz=BON["tz"])
+            with self.subTest(day=day), patch.object(merra, "load_merra_data", side_effect=hourly_data):
+                result = merra.process_merra(BON, start, end)
+            self.assertEqual(len(result), count)
+            self.assertTrue(result.index.is_unique)
+            self.assertTrue((result.index[1:] - result.index[:-1] == pd.Timedelta(hours=1)).all())
+
+    def test_nonfinite_input_raises(self):
+        data = hourly_data(BON, "2024-10-01", "2024-10-01")
+        data.loc[data.index[1], "wv"] = np.nan
+        with patch.object(merra, "load_merra_data", return_value=data):
+            with self.assertRaisesRegex(ValueError, "MERRA wv: missing/nonfinite"):
+                merra.process_merra(BON, "2024-10-01", "2024-10-01")
+
+
 class ProcessingTests(unittest.TestCase):
     def test_interpolation_preserves_values_units_and_utc_ticks(self):
         with patch.object(merra, "load_merra_data", side_effect=hourly_data):
-            result = merra.process_merra(BON, "2024-10-01T01:00", "2024-10-01T03:00")
+            result = merra.process_merra_1min(BON, "2024-10-01T01:00", "2024-10-01T03:00")
         self.assertEqual(list(result), list(UNITS))
         self.assertEqual(result.attrs["units"], UNITS)
         self.assertEqual(len(result), 121)
@@ -78,7 +117,7 @@ class ProcessingTests(unittest.TestCase):
 
     def test_offset_grid_keeps_hourly_interpolation_knots(self):
         with patch.object(merra, "load_merra_data", side_effect=hourly_data):
-            result = merra.process_merra(BON, "2024-10-01T01:00:15", "2024-10-01T01:02:20")
+            result = merra.process_merra_1min(BON, "2024-10-01T01:00:15", "2024-10-01T01:02:20")
         self.assertEqual(len(result), 3)
         self.assertAlmostEqual(result.o3.iloc[0], 30.25 / 60)
         self.assertEqual(result.index.tz_convert("UTC")[-1], pd.Timestamp("2024-10-01T01:02:15Z"))
@@ -88,7 +127,7 @@ class ProcessingTests(unittest.TestCase):
             with self.subTest(day=day), patch.object(merra, "load_merra_data", side_effect=hourly_data):
                 start = pd.Timestamp(day, tz=BON["tz"])
                 end = pd.Timestamp(f"{day}T23:59", tz=BON["tz"])
-                result = merra.process_merra(BON, start, end)
+                result = merra.process_merra_1min(BON, start, end)
                 self.assertEqual(len(result), count)
                 self.assertTrue(result.index.is_unique and result.index.is_monotonic_increasing)
                 self.assertTrue((result.index[1:] - result.index[:-1] == pd.Timedelta(minutes=1)).all())
@@ -102,13 +141,13 @@ class ProcessingTests(unittest.TestCase):
                 data = data.drop(data.index[{"left": 0, "right": -1, "hour": 1}[kind]])
             with self.subTest(kind=kind), patch.object(merra, "load_merra_data", return_value=data):
                 with self.assertRaisesRegex(ValueError, r"MERRA (wv|o3):.*affected UTC period"):
-                    merra.process_merra(BON, "2024-10-01T01:00", "2024-10-01T03:00")
+                    merra.process_merra_1min(BON, "2024-10-01T01:00", "2024-10-01T03:00")
 
     def test_nonfinite_outside_required_records_is_not_filled(self):
         data = hourly_data(BON, "2024-10-01T01:00", "2024-10-01T03:00")
         data.loc[data.index[0] - pd.Timedelta(hours=1)] = np.nan
         with patch.object(merra, "load_merra_data", return_value=data):
-            result = merra.process_merra(BON, "2024-10-01T01:00", "2024-10-01T03:00")
+            result = merra.process_merra_1min(BON, "2024-10-01T01:00", "2024-10-01T03:00")
         self.assertFalse(result.isna().any().any())
 
 
@@ -119,9 +158,13 @@ class CacheTests(unittest.TestCase):
             (root / "BON").mkdir()
             for product in merra.MERRA_PRODUCTS:
                 fixture(root / "BON" / f"MERRA2_400.tavg1_2d_{product}_Nx.20241001.SUB.nc", product)
-            with patch.object(merra, "MERRA_CACHE_DIR", root), patch.object(merra2, "merra_download_subset") as download:
-                result = merra.process_merra(BON, "2024-10-01T01:00", "2024-10-01T03:00")
+            with patch.object(merra, "MERRA_CACHE_DIR", root), patch.object(merra, "_monthly_subset", side_effect=RuntimeError("monthly unavailable")), patch.object(merra2, "merra_download_subset") as download:
+                result = merra.process_merra_1min(BON, "2024-10-01T01:00", "2024-10-01T03:00")
+                native = merra.process_merra(BON, "2024-10-01T01:00", "2024-10-01T03:00")
                 download.assert_not_called()
+            np.testing.assert_array_equal(native.to_numpy(), result.loc[native.index].to_numpy())
+            self.assertEqual(list(native), list(result))
+            self.assertEqual(len(native), 2)
             self.assertEqual(len(result), 121)
             self.assertEqual(result.attrs["units"], UNITS)
 

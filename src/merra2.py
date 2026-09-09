@@ -16,13 +16,25 @@ POLL_INTERVAL = 5
 def _subset_rpc(method, args):
     request = {"methodname": method, "type": "jsonwsp/request",
                "version": "1.0", "args": args}
-    try:
-        with requests.post(GESDISC_SUBSET_URL, json=request,
-                           timeout=HTTP_TIMEOUT) as response:
-            response.raise_for_status()
-            payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise RuntimeError(f"GES DISC {method}: {exc}") from exc
+    delays = (5, 10, 20, 40, 60)
+    for attempt in range(len(delays) + 1):
+        try:
+            with requests.post(GESDISC_SUBSET_URL, json=request,
+                               timeout=HTTP_TIMEOUT) as response:
+                response.raise_for_status()
+                payload = response.json()
+            break
+        except (requests.RequestException, ValueError) as exc:
+            status = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response is not None else None
+            transient = (status in (429, 500, 502, 503, 504)
+                         or isinstance(exc, (requests.ConnectionError, requests.Timeout))
+                         and not isinstance(exc, requests.exceptions.SSLError))
+            if not transient or attempt == len(delays):
+                raise RuntimeError(f"GES DISC {method}: {exc}") from exc
+            delay = delays[attempt]
+            reason = status if status is not None else type(exc).__name__
+            print(f"GES DISC error temporal {reason}. Reintento {attempt + 1}/{len(delays)} en {delay} s...", flush=True)
+            time.sleep(delay)
     if not isinstance(payload, dict) or payload.get("type") == "jsonwsp/fault":
         raise RuntimeError(f"GES DISC {method} fault: {payload}")
     if not isinstance(payload.get("result"), dict):
@@ -43,7 +55,15 @@ def merra_subset_request(dataset_id, variables, start, end, bbox):
 
 
 def merra_subset_result(job_id, session_id):
-    """Wait at most JOB_TIMEOUT seconds, then return the daily NetCDF link.
+    """Return the single NetCDF link required by the daily acquisition path."""
+    links = _subset_result_links(job_id, session_id)
+    if len(links) != 1:
+        raise RuntimeError(f"GES DISC job {job_id}: expected one NetCDF link, got {len(links)}")
+    return links[0]
+
+
+def _subset_result_links(job_id, session_id):
+    """Wait at most JOB_TIMEOUT seconds, then return the NetCDF links.
 
     Each HTTP call also has bounded connection/read waits. An in-flight
     status request can finish after the polling deadline by its HTTP timeout.
@@ -71,9 +91,7 @@ def merra_subset_result(job_id, session_id):
              and isinstance(item.get("link"), str)
              and urlparse(item["link"]).scheme == "https"
              and ".nc" in unquote(item["link"]).lower()]
-    if len(links) != 1:
-        raise RuntimeError(f"GES DISC job {job_id}: expected one NetCDF link, got {len(links)}")
-    return links[0]
+    return links
 
 
 def merra_download_subset(dataset_id, variables, start, end, bbox, output_file):
@@ -83,8 +101,21 @@ def merra_download_subset(dataset_id, variables, start, end, bbox, output_file):
     Failed transfers leave any pre-existing output untouched.
     """
     job_id, session_id = merra_subset_request(dataset_id, variables, start, end, bbox)
-    print(f"GES DISC {dataset_id}: job {job_id}", flush=True)
     link = merra_subset_result(job_id, session_id)
+    return _download_link(link, output_file, dataset_id)
+
+
+def _download_monthly_subsets(dataset_id, variables, start, end, bbox, directory):
+    """Download all NetCDF results sequentially into a caller-owned staging dir."""
+    job_id, session_id = merra_subset_request(dataset_id, variables, start, end, bbox)
+    links = _subset_result_links(job_id, session_id)
+    if not links:
+        raise RuntimeError("GES DISC: missing monthly NetCDF links")
+    return [_download_link(link, Path(directory) / f"{i:03d}.nc", dataset_id)
+            for i, link in enumerate(links)]
+
+
+def _download_link(link, output_file, dataset_id):
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     # A unique temporary name also avoids collisions between concurrent callers.

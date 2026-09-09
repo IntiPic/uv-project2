@@ -3,7 +3,8 @@
 from datetime import date, datetime
 from pathlib import Path
 import re
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
+from time import perf_counter
 import warnings
 
 import numpy as np
@@ -14,6 +15,8 @@ import xarray as xr
 from . import merra2
 
 MERRA_CACHE_DIR = Path(__file__).resolve().parents[1] / "data/raw/merra"
+MERRA_MONTHLY_CACHE_DIR = Path(__file__).resolve().parents[1] / "data/raw/merra_monthly"
+DAILY_FAILURE_LIMIT = 2
 MERRA_PRODUCTS = {
     "slv": {"short_name": "M2T1NXSLV", "dataset_id": "M2T1NXSLV_5.12.4",
             "variables": {"o3": "TO3", "wv": "TQV"},
@@ -38,7 +41,7 @@ def _utc_timestamp(value):
             else timestamp.tz_convert("UTC"))
 
 
-def _minute_index(start, end):
+def _period_bounds(start, end):
     # A datetime at midnight is an explicit instant, unlike a date object/string.
     date_only_end = ((isinstance(end, date) and not isinstance(end, datetime))
                      or (isinstance(end, str)
@@ -48,6 +51,11 @@ def _minute_index(start, end):
         last += pd.Timedelta(days=1)
     if last < first or (date_only_end and last == first):
         raise ValueError(f"MERRA invalid period: {start!r} to {end!r}")
+    return first, last, date_only_end
+
+
+def _minute_index(start, end):
+    first, last, date_only_end = _period_bounds(start, end)
     return pd.date_range(first, last, freq="1min",
                          inclusive="left" if date_only_end else "both")
 
@@ -59,15 +67,15 @@ def _required_hours(index):
     return pd.date_range(first, last, freq="h")
 
 
-def _read_subset(path, station, product, day):
-    """Read/validate one daily point subset without filling its missing values."""
+def _read_subset(path, station, product, day, hours=24):
+    """Read/validate native point data (24 hours by default), without filling."""
     spec = MERRA_PRODUCTS[product]
     variables = list(spec["variables"].values())
     context = f"MERRA {variables}, UTC day {day:%Y-%m-%d}, file {path}"
     try:
         with xr.open_dataset(path, engine="h5netcdf") as ds:
-            if dict(ds.sizes) != {"time": 24, "lat": 1, "lon": 1}:
-                raise ValueError(f"expected time=24, lat=1, lon=1; got {dict(ds.sizes)}")
+            if dict(ds.sizes) != {"time": hours, "lat": 1, "lon": 1}:
+                raise ValueError(f"expected time={hours}, lat=1, lon=1; got {dict(ds.sizes)}")
             if ds.attrs.get("ShortName") != spec["short_name"] or ds.attrs.get("VersionID") != "5.12.4":
                 raise ValueError("unexpected product/version metadata")
             for variable in variables:
@@ -89,7 +97,7 @@ def _read_subset(path, station, product, day):
                 if not np.isfinite(value) or distance > spacing / 2 + 1e-8:
                     raise ValueError(f"{coord}={value} is not the station's nearest grid point")
             timestamps = pd.DatetimeIndex(ds.time.values).tz_localize("UTC")
-            expected = pd.date_range(day + pd.Timedelta(minutes=30), periods=24, freq="h")
+            expected = pd.date_range(day + pd.Timedelta(minutes=30), periods=hours, freq="h")
             if not timestamps.is_unique or not timestamps.sort_values().equals(expected):
                 raise ValueError("missing/duplicate/incorrect hourly UTC timestamps")
             frame = ds[variables].isel(lat=0, lon=0).to_dataframe()[variables].copy()
@@ -116,6 +124,7 @@ def _daily_subset(station, product, day):
             except ValueError as exc:
                 warnings.warn(f"Invalid subset cache: {exc}", RuntimeWarning, stacklevel=2)
 
+    started = perf_counter()
     directory.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=directory, suffix=".pending.nc", delete=False) as f:
         pending = Path(f.name)
@@ -129,11 +138,61 @@ def _daily_subset(station, product, day):
             bbox=bbox, output_file=pending)
         frame = _read_subset(pending, station, product, day)
         pending.replace(target)
+        frame.attrs["download_seconds"] = perf_counter() - started
         return frame
     except Exception as exc:
         raise RuntimeError(f"MERRA {list(spec['variables'].values())}, UTC day {day:%Y-%m-%d}: {exc}") from exc
     finally:
         pending.unlink(missing_ok=True)
+
+
+def _monthly_subset(station, product, month, expected_point=None):
+    """Acquire/validate a full UTC month; publish a separate cache atomically."""
+    spec = MERRA_PRODUCTS[product]
+    hours = month.days_in_month * 24
+    directory = MERRA_MONTHLY_CACHE_DIR / station["name"]
+    target = directory / f"{spec['dataset_id']}.{month:%Y%m}.SUB.nc"
+    if target.is_file():
+        try:
+            frame = _read_subset(target, station, product, month, hours)
+            if expected_point is not None and frame.attrs["grid_point"] != expected_point:
+                raise ValueError("inconsistent monthly grid point")
+            if not np.isfinite(frame.to_numpy()).all():
+                raise ValueError("nonfinite monthly input")
+            return frame
+        except (OSError, ValueError) as exc:
+            warnings.warn(f"Invalid monthly subset cache: {exc}", RuntimeWarning, stacklevel=2)
+
+    started = perf_counter()
+    directory.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=directory, prefix=".pending-") as staging:
+        lat, lon = float(station["lat"]), float(station["lon"])
+        bbox = [max(-180, lon - 0.01), max(-90, lat - 0.01), lon, lat]
+        last = month + pd.offsets.MonthBegin(1) - pd.Timedelta(seconds=1)
+        paths = merra2._download_monthly_subsets(
+            spec["dataset_id"], list(spec["variables"].values()),
+            month.strftime("%Y-%m-%dT00:00:00"), last.strftime("%Y-%m-%dT%H:%M:%S"),
+            bbox, staging)
+        datasets, point = [], None
+        for path in paths:
+            with xr.open_dataset(path, engine="h5netcdf") as ds:
+                first = _utc_timestamp(ds.time.values[0]).normalize()
+                frame = _read_subset(path, station, product, first, ds.sizes["time"])
+                if point is not None and frame.attrs["grid_point"] != point:
+                    raise ValueError("MERRA monthly subsets select inconsistent grid points")
+                point = frame.attrs["grid_point"]
+                datasets.append(ds.load())
+        combined = xr.concat(datasets, dim="time", join="exact").sortby("time")
+        pending = Path(staging) / "monthly.nc"
+        combined.to_netcdf(pending, engine="h5netcdf")
+        frame = _read_subset(pending, station, product, month, hours)
+        if expected_point is not None and frame.attrs["grid_point"] != expected_point:
+            raise ValueError("inconsistent monthly grid point")
+        if not np.isfinite(frame.to_numpy()).all():
+            raise ValueError("nonfinite monthly input")
+        pending.replace(target)
+    frame.attrs["download_seconds"] = perf_counter() - started
+    return frame
 
 
 def load_merra_data(station, start, end):
@@ -152,8 +211,58 @@ def load_merra_data(station, start, end):
             raise ValueError(f"Invalid station {coord}")
     days = _required_hours(index).normalize().unique()
     products, units, point = [], {}, None
-    for product in MERRA_PRODUCTS:
-        frames = [_daily_subset(station, product, day) for day in days]
+    frames_by_product = {product: [] for product in MERRA_PRODUCTS}
+    months = days.map(lambda day: day.replace(day=1)).unique()
+    monthly_point = None
+    for month in months:
+        month_days = days[(days.year == month.year) & (days.month == month.month)]
+        download_seconds = None
+        try:
+            monthly = {}
+            point_before = monthly_point
+            for product in MERRA_PRODUCTS:
+                frame = _monthly_subset(station, product, month, expected_point=monthly_point)
+                if monthly_point is not None and frame.attrs["grid_point"] != monthly_point:
+                    raise ValueError("MERRA monthly subsets select inconsistent grid points")
+                monthly_point = frame.attrs["grid_point"]
+                elapsed = frame.attrs.pop("download_seconds", None)
+                if elapsed is not None:
+                    download_seconds = (download_seconds or 0) + elapsed
+                monthly[product] = frame.loc[frame.index.normalize().isin(month_days)]
+        except Exception:
+            monthly_point = point_before
+            download_seconds = None
+            print(f"MERRA {month:%Y-%m}: subset mensual falló; usando fallback diario.", flush=True)
+            monthly = {product: [] for product in MERRA_PRODUCTS}
+            for day in month_days:
+                for product in MERRA_PRODUCTS:
+                    # Retry the pending subset, never skip a missing input.
+                    # Each failure here follows a complete _daily_subset call,
+                    # including its existing HTTP retries.
+                    for failures in range(1, DAILY_FAILURE_LIMIT + 1):
+                        try:
+                            frame = _daily_subset(station, product, day)
+                            break
+                        except RuntimeError as exc:
+                            if failures == DAILY_FAILURE_LIMIT:
+                                raise RuntimeError(
+                                    f"MERRA {name}: GES DISC continúa inaccesible después de "
+                                    f"{failures} descargas diarias fallidas; abortando estación "
+                                    f"({day:%Y-%m-%d}, {product.upper()})."
+                                ) from exc
+                    if monthly_point is not None and frame.attrs["grid_point"] != monthly_point:
+                        raise ValueError("MERRA subsets select inconsistent grid points")
+                    monthly_point = frame.attrs["grid_point"]
+                    elapsed = frame.attrs.pop("download_seconds", None)
+                    if elapsed is not None:
+                        download_seconds = (download_seconds or 0) + elapsed
+                    monthly[product].append(frame)
+            monthly = {product: pd.concat(frames).sort_index() for product, frames in monthly.items()}
+        for product, frame in monthly.items():
+            frames_by_product[product].append(frame)
+        if download_seconds is not None:
+            print(f"MERRA {month:%Y-%m} descargado (AER + SLV) en {download_seconds:.1f} s", flush=True)
+    for product, frames in frames_by_product.items():
         for frame in frames:
             if point is not None and frame.attrs["grid_point"] != point:
                 raise ValueError("MERRA subsets select inconsistent grid points")
@@ -171,6 +280,28 @@ def load_merra_data(station, start, end):
 
 
 def process_merra(station, start, end):
+    """Return native hourly o3, wv, aod, alpha for the requested period.
+
+    Preserve original tavg1 timestamps and station timezone; do not interpolate.
+    Naive bounds mean UTC; aware bounds preserve their instant. A date-only end
+    includes the whole UTC day; an explicit end instant is inclusive.
+    Acquisition retains the same cached subsets and interpolation edge days.
+    """
+    first, last, date_only_end = _period_bounds(start, end)
+    hourly = load_merra_data(station, start, end)
+    if not hourly.index.is_unique:
+        raise ValueError("MERRA: duplicate hourly timestamps")
+    upper = hourly.index < last if date_only_end else hourly.index <= last
+    result = hourly.loc[(hourly.index >= first) & upper].copy()
+    for variable in ("o3", "wv", "aod", "alpha"):
+        invalid = ~np.isfinite(result[variable].to_numpy())
+        if invalid.any():
+            missing = result.index[invalid][0].tz_convert("UTC")
+            raise ValueError(f"MERRA {variable}: missing/nonfinite hourly input at {missing}")
+    return result
+
+
+def process_merra_1min(station, start, end):
     """Return o3, wv, aod, alpha at one-minute cadence for the requested period.
 
     Naive bounds are UTC; aware bounds retain their instant. ISO YYYY-MM-DD

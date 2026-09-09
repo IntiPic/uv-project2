@@ -10,6 +10,108 @@ import numpy as np
 import pandas as pd 
 from pathlib import Path
 
+def load_usa_uv(station_id, path):
+    """Return (DataFrame, 'f01' or 'f05') from a USA OUT directory.
+
+    Preserve original columns (UV is labelled UVB), flags, numeric sentinels,
+    row order and cadence. Empty CSV fields become NaN. Naive CSV timestamps
+    represent UTC and are localized as UTC without shifting clock times.
+    The CSVs do not declare units; no unit conversions are applied.
+    No QC filtering, interpolation or resampling is applied.
+    """
+    tag = station_id.lower()
+    directory = Path(path) / tag
+    searched = []
+    for resolution in ("f01", "f05"):
+        # BRW and MSN use the existing uppercase F01 filename variant.
+        for suffix in (resolution, resolution.upper()):
+            filename = directory / f"{tag}_UVdata_{suffix}.csv"
+            searched.append(filename)
+            if not filename.is_file():
+                continue
+            df = pd.read_csv(filename, index_col=0)
+            if "UVB" not in df.columns:
+                raise ValueError(f"UV USA {station_id}: missing UVB column in {filename}")
+            df.index = pd.to_datetime(df.index, format="%Y-%m-%d %H:%M:%S", errors="raise")
+            if df.index.hasnans:
+                raise ValueError(f"UV USA {station_id}: missing timestamps in {filename}")
+            df.index = df.index.tz_localize("UTC")
+            return df, resolution
+    raise FileNotFoundError(
+        f"UV USA {station_id}: no f01/f05 file found; searched: "
+        + ", ".join(str(filename) for filename in searched)
+    )
+
+
+def clean_usa_uv(df, resolution):
+    """Return a copy replacing only the UVB missing sentinel -9.9999 with NaN.
+
+    Both f01 and f05 retain their index, columns, flags and other values.
+    No flag-based filtering or temporal processing is applied.
+    """
+    if resolution not in ("f01", "f05"):
+        raise ValueError(f"Unsupported USA UV resolution: {resolution!r}")
+    result = df.copy()
+    result["UVB"] = result["UVB"].mask(result["UVB"].eq(-9.9999))
+    return result
+
+
+def regularize_usa_uv(df, resolution):
+    """Insert missing UTC timestamps as NaN rows, without interpolation.
+
+    The grid spans the first through last observation at the native cadence.
+    Reject off-grid timestamps rather than silently discarding observations.
+    """
+    frequencies = {"f01": "1min", "f05": "5min"}
+    if resolution not in frequencies:
+        raise ValueError(f"Unsupported USA UV resolution: {resolution!r}")
+    if not isinstance(df.index, pd.DatetimeIndex) or str(df.index.tz) != "UTC":
+        raise ValueError("USA UV: index must be timezone-aware in UTC")
+    if df.index.hasnans or not df.index.is_unique:
+        raise ValueError("USA UV: timestamps must be valid and unique")
+    if df.empty:
+        return df.copy()
+    grid = pd.date_range(df.index.min(), df.index.max(),
+                         freq=frequencies[resolution], name=df.index.name)
+    if not df.index.isin(grid).all():
+        raise ValueError("USA UV: timestamps do not fit the requested cadence")
+    return df.reindex(grid)
+
+
+def match_usa_uv_merra(df_uv, df_merra):
+    """Attach native MERRA values at floor(UV hour) + 30 minutes.
+
+    Both indices must already be UTC. Return all UV rows/columns unchanged
+    plus o3, wv, aod, alpha; absent MERRA records become NaN. Report the number
+    of unmatched observations and store it in attrs['merra_unmatched_count'].
+    """
+    for label, frame in (("UV", df_uv), ("MERRA", df_merra)):
+        if not isinstance(frame.index, pd.DatetimeIndex) or str(frame.index.tz) != "UTC":
+            raise ValueError(f"{label}: index must be timezone-aware in UTC")
+        if frame.index.hasnans:
+            raise ValueError(f"{label}: index contains NaT")
+    columns = ["o3", "wv", "aod", "alpha"]
+    if not df_merra.index.is_unique:
+        raise ValueError("MERRA: duplicate timestamps")
+    if not (df_merra.index == df_merra.index.floor("h") + pd.Timedelta(minutes=30)).all():
+        raise ValueError("MERRA: expected native timestamps centered at HH:30:00")
+    missing = [column for column in columns if column not in df_merra.columns]
+    if missing:
+        raise ValueError(f"MERRA: missing columns {missing}")
+    overlap = [column for column in columns if column in df_uv.columns]
+    if overlap:
+        raise ValueError(f"UV: cannot overwrite existing columns {overlap}")
+    centers = df_uv.index.floor("h") + pd.Timedelta(minutes=30)
+    matched = df_merra[columns].reindex(centers)
+    result = df_uv.copy()
+    for column in columns:
+        result[column] = matched[column].to_numpy()
+    unmatched = int((~centers.isin(df_merra.index)).sum())
+    result.attrs["merra_unmatched_count"] = unmatched
+    print(f"UV USA: {unmatched} de {len(df_uv)} observaciones sin match MERRA.", flush=True)
+    return result
+
+
 def filenames(station, path):
     label = station["name"]
     period = station["period"]
@@ -238,4 +340,3 @@ def load_chile_rad(station, path, start=None, end=None):
     
 
     return df
-
